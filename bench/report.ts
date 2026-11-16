@@ -168,6 +168,23 @@ async function api<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+const PAGE = 100;
+const MAX_PAGES = 100;
+
+/**
+ * Every cache entry in the repository. magic-nix-cache writes two entries per store path, so one
+ * run alone fills more than a page, and the newest entries aren't always the ones that matter.
+ */
+async function allCaches(repo: string): Promise<Cache[]> {
+  const caches: Cache[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const { actions_caches } = await api<{ actions_caches: Cache[] }>(`/repos/${repo}/actions/caches?per_page=${PAGE}&page=${page}&sort=created_at&direction=desc`);
+    caches.push(...actions_caches);
+    if (actions_caches.length < PAGE) break;
+  }
+  return caches;
+}
+
 if (import.meta.main) {
   const [dir, out] = process.argv.slice(2);
   const repo = process.env.GITHUB_REPOSITORY;
@@ -179,10 +196,10 @@ if (import.meta.main) {
   } else {
     const run = await api<{ created_at: string; head_branch: string; event: string; pull_requests: { number: number }[] }>(`/repos/${repo}/actions/runs/${id}`);
     const { jobs } = await api<{ jobs: Job[] }>(`/repos/${repo}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`);
-    const { actions_caches } = await api<{ actions_caches: Cache[] }>(`/repos/${repo}/actions/caches?per_page=100&sort=created_at&direction=desc`);
+    const caches = await allCaches(repo);
     const ref = run.event === "pull_request" && run.pull_requests[0] ? `refs/pull/${run.pull_requests[0].number}/merge` : `refs/heads/${run.head_branch}`;
     const table = rows(jobs, readResults(dir));
-    const stored = cacheBytes(actions_caches, ref, run.created_at, `${id}-${attempt}`);
+    const stored = cacheBytes(caches, ref, run.created_at, `${id}-${attempt}`);
     writeFileSync(out, JSON.stringify({ run: { id, attempt, ref, created_at: run.created_at }, rows: table, cacheBytes: stored }, null, 2) + "\n");
     console.log(markdown(table, stored));
   }

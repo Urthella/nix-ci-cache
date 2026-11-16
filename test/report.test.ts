@@ -118,6 +118,12 @@ test("results are read from the downloaded artifacts", () => {
   assert.deepEqual(results.find((r) => r.approach === "cache-nix-action" && r.pass === "warm")?.plan, { built: 0, fetched: 0, downloadMiB: 0 });
 });
 
+const CACHES: Cache[] = [
+  ...Array.from({ length: 230 }, (_, i): Cache => ({ key: `${String(i).padStart(32, "0")}.${i % 2 ? "narinfo" : "nar.zstd"}-ab${i}`, ref: "refs/heads/main", created_at: at(400 - i), size_in_bytes: 1000 })),
+  { key: "bench-Linux-77-1", ref: "refs/heads/main", created_at: at(150), size_in_bytes: 1024 ** 3 },
+  { key: `pack-${"ab".repeat(32)}`, ref: "refs/heads/main", created_at: at(140), size_in_bytes: 5 * 1024 ** 2 },
+];
+
 test("end to end, against a fake GitHub API", async () => {
   const asked: string[] = [];
   const server = createServer((request, response) => {
@@ -127,7 +133,13 @@ test("end to end, against a fake GitHub API", async () => {
     if (url.pathname === "/repos/me/bench/actions/runs/77") return send({ created_at: at(-5), head_branch: "main", event: "push", pull_requests: [] });
     if (url.pathname === "/repos/me/bench/actions/runs/78") return send({ created_at: at(-5), head_branch: "feature", event: "pull_request", pull_requests: [{ number: 3 }] });
     if (/^\/repos\/me\/bench\/actions\/runs\/7[78]\/attempts\/1\/jobs$/.test(url.pathname)) return send({ jobs: JOBS });
-    if (url.pathname === "/repos/me/bench/actions/caches") return send({ actions_caches: [{ key: "bench-Linux-77-1", ref: "refs/heads/main", created_at: at(300), size_in_bytes: 1024 ** 3 }] });
+    if (url.pathname === "/repos/me/bench/actions/caches") {
+      // As in a real run: magic-nix-cache's many entries come first, newest first, so the
+      // cache-nix-action and Hestia entries are on the third page.
+      const page = Number(url.searchParams.get("page") ?? 1);
+      const perPage = Number(url.searchParams.get("per_page") ?? 30);
+      return send({ total_count: CACHES.length, actions_caches: CACHES.slice((page - 1) * perPage, page * perPage) });
+    }
     response.writeHead(404).end();
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -145,6 +157,8 @@ test("end to end, against a fake GitHub API", async () => {
     assert.equal(out.text.trim().split("\n").length, 10, "a header, a rule and eight rows");
     assert.match(out.text, /\| cache-nix-action \| cold \| .+ \| 1024 MiB \|/);
     const saved = JSON.parse(readFileSync(join(dir, "report-77.json"), "utf8"));
+    assert.deepEqual(saved.cacheBytes, { "cache-nix-action": 1024 ** 3, hestia: 5 * 1024 ** 2, "magic-nix-cache": 230_000 }, "entries from every page are counted");
+    assert.ok(asked.some((line) => line.includes("page=3")), "the third page was read");
     assert.deepEqual(saved.run, { id: "77", attempt: "1", ref: "refs/heads/main", created_at: at(-5) });
     assert.equal(saved.rows.length, 8);
     assert.deepEqual(saved.rows.filter((row: { conclusion: string }) => row.conclusion === "missing"), [], "every result found its job");

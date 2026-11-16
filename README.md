@@ -78,8 +78,9 @@ BENCH_RUN=mine nix build --impure .#default
   - step times include post steps, and skipped steps show no time rather than 0s;
   - cache sizes count only this run's entries, on its ref, telling Hestia's packs and manifests from
     magic-nix-cache's entries;
-  - end to end, the script runs against a fake GitHub API, for a push and for a pull request.
-- **Mutation testing.** Twenty-two deliberate bugs were planted in the report one at a time, and
+  - end to end, the script runs against a fake GitHub API, for a push and for a pull request,
+    reading every page of the cache list: magic-nix-cache alone fills more than the first one.
+- **Mutation testing.** Twenty-three deliberate bugs were planted in the report one at a time, and
   the tests caught every one.
 
 ## Limits
