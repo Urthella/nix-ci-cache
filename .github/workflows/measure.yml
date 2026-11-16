@@ -1,0 +1,64 @@
+# One measured job: install Nix, set up one caching approach, then build the workload and enter
+# the dev shell. The report reads each step's time from the GitHub API, so the steps keep these
+# names, and the post steps the cache actions add are timed the same way.
+name: measure
+
+on:
+  workflow_call:
+    inputs:
+      approach:
+        type: string
+        required: true
+      pass:
+        type: string
+        required: true
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    env:
+      # The same for the cold and the warm job of a run, and new for every run.
+      BENCH_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up magic-nix-cache
+        if: inputs.approach == 'magic-nix-cache'
+        uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+          diagnostic-endpoint: ""
+
+      - name: Restore with cache-nix-action
+        if: inputs.approach == 'cache-nix-action'
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: bench-${{ runner.os }}-${{ env.BENCH_RUN }}
+
+      - name: Plan the build
+        run: nix build --impure --dry-run .#default 2>&1 | tee plan.txt
+
+      - name: Build
+        run: nix build --impure -L .#default
+
+      - name: Enter the dev shell
+        run: nix develop --impure -c true
+
+      - name: Record the store
+        run: |
+          mkdir -p out
+          mv plan.txt out/
+          du -sb /nix/store | cut -f1 > out/store-bytes
+          echo '${{ inputs.approach }}' > out/approach
+          echo '${{ inputs.pass }}' > out/pass
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: result-${{ inputs.approach }}-${{ inputs.pass }}
+          path: out/

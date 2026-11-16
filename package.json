@@ -1,0 +1,19 @@
+{
+  "name": "nix-ci-cache",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nix caching on GitHub Actions, measured: no cache, magic-nix-cache and cache-nix-action, cold and warm",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}

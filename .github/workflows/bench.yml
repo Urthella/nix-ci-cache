@@ -1,0 +1,58 @@
+# Builds the same workload with each caching approach, first with an empty cache and then again
+# in a second job that can use what the first one saved, and reports the times and cache sizes in
+# the run's summary.
+name: bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cold:
+    strategy:
+      fail-fast: false
+      matrix:
+        approach: [none, magic-nix-cache, cache-nix-action]
+    uses: ./.github/workflows/measure.yml
+    with:
+      approach: ${{ matrix.approach }}
+      pass: cold
+
+  warm:
+    needs: cold
+    strategy:
+      fail-fast: false
+      matrix:
+        approach: [none, magic-nix-cache, cache-nix-action]
+    uses: ./.github/workflows/measure.yml
+    with:
+      approach: ${{ matrix.approach }}
+      pass: warm
+
+  report:
+    needs: [cold, warm]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: result-*
+          path: results
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node bench/report.ts results report.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: report
+          path: report.json
