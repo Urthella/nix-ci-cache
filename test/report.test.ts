@@ -44,6 +44,8 @@ const JOBS: Job[] = [
   job("warm (none) / measure", measured([], 199, 29)),
   job("warm (magic-nix-cache) / measure", measured([step("Set up magic-nix-cache", 20, 26)], 40, 30, [step("Post Set up magic-nix-cache", 120, 121)])),
   job("warm (cache-nix-action) / measure", measured([step("Restore with cache-nix-action", 20, 80)], 3, 1, [step("Post Restore with cache-nix-action", 120, 121)]), "failure"),
+  job("cold (hestia) / measure", measured([step("Set up hestia", 20, 23)], 208, 30, [step("Post Set up hestia", 300, 330)])),
+  job("warm (hestia) / measure", measured([step("Set up hestia", 20, 24)], 20, 25, [step("Post Set up hestia", 120, 122)])),
 ];
 
 const result = (approach: string, pass: string, built: number): Result => ({ approach, pass, plan: { built, fetched: built ? 101 : 0, downloadMiB: built ? 648.4 : 0 }, storeBytes: 3 * 1024 ** 3 });
@@ -63,6 +65,8 @@ test("each row takes its job's step times, post steps and skipped steps included
   assert.deepEqual([mnc.restore, mnc.build, mnc.save, mnc.job], [5, 210, 40, 340]);
   assert.deepEqual([cna.restore, cna.build, cna.shell, cna.save, cna.conclusion], [60, 3, 1, 1, "failure"]);
   assert.equal(rows([], [result("none", "cold", 5)])[0].conclusion, "missing");
+  const hestia = rows(JOBS, [result("hestia", "warm", 0)])[0];
+  assert.deepEqual([hestia.restore, hestia.build, hestia.save], [4, 20, 2], "Hestia's setup and post steps");
   const unset = rows([job("cold (magic-nix-cache) / measure", measured([step("Set up magic-nix-cache", 20, 20, "skipped")], 10, 10))], [result("magic-nix-cache", "cold", 5)])[0];
   assert.equal(unset.restore, undefined, "an approach whose own setup was skipped shows no restore time, not 0s");
 });
@@ -76,8 +80,11 @@ test("cache sizes are counted per approach, for this run's ref and time", () => 
     cache("4d5e6f-nar", "refs/heads/main", 311, 300),
     cache("7a8b9c-nar", "refs/pull/3/merge", 312, 5_000), // another ref
     cache("0f0f0f-nar", "refs/heads/main", -100, 7_000), // before the run
+    cache(`pack-${"3a".repeat(32)}`, "refs/heads/main", 320, 60_000),
+    cache("m3#7", "refs/heads/main", 330, 4_000),
+    cache(`pack-${"3a".repeat(31)}`, "refs/heads/main", 330, 1), // not a SHA-256: not Hestia's
   ];
-  assert.deepEqual(cacheBytes(caches, "refs/heads/main", at(0), "77-1"), { "cache-nix-action": 2_000, "magic-nix-cache": 330 });
+  assert.deepEqual(cacheBytes(caches, "refs/heads/main", at(0), "77-1"), { "cache-nix-action": 2_000, hestia: 64_000, "magic-nix-cache": 331 });
 });
 
 test("the table shows minutes, failures and what each cold pass stored", () => {
@@ -100,16 +107,22 @@ function artifact(approach: string, pass: string, plan: string) {
   writeFileSync(join(path, "plan.txt"), plan);
   writeFileSync(join(path, "store-bytes"), "3221225472\n");
 }
-for (const approach of ["none", "magic-nix-cache", "cache-nix-action"]) {
+for (const approach of ["none", "magic-nix-cache", "cache-nix-action", "hestia"]) {
   artifact(approach, "cold", COLD_PLAN);
   artifact(approach, "warm", approach === "none" ? COLD_PLAN : "");
 }
 
 test("results are read from the downloaded artifacts", () => {
   const results = readResults(join(dir, "results"));
-  assert.equal(results.length, 6);
+  assert.equal(results.length, 8);
   assert.deepEqual(results.find((r) => r.approach === "cache-nix-action" && r.pass === "warm")?.plan, { built: 0, fetched: 0, downloadMiB: 0 });
 });
+
+const CACHES: Cache[] = [
+  ...Array.from({ length: 230 }, (_, i): Cache => ({ key: `${String(i).padStart(32, "0")}.${i % 2 ? "narinfo" : "nar.zstd"}-ab${i}`, ref: "refs/heads/main", created_at: at(400 - i), size_in_bytes: 1000 })),
+  { key: "bench-Linux-77-1", ref: "refs/heads/main", created_at: at(150), size_in_bytes: 1024 ** 3 },
+  { key: `pack-${"ab".repeat(32)}`, ref: "refs/heads/main", created_at: at(140), size_in_bytes: 5 * 1024 ** 2 },
+];
 
 test("end to end, against a fake GitHub API", async () => {
   const asked: string[] = [];
@@ -120,7 +133,13 @@ test("end to end, against a fake GitHub API", async () => {
     if (url.pathname === "/repos/me/bench/actions/runs/77") return send({ created_at: at(-5), head_branch: "main", event: "push", pull_requests: [] });
     if (url.pathname === "/repos/me/bench/actions/runs/78") return send({ created_at: at(-5), head_branch: "feature", event: "pull_request", pull_requests: [{ number: 3 }] });
     if (/^\/repos\/me\/bench\/actions\/runs\/7[78]\/attempts\/1\/jobs$/.test(url.pathname)) return send({ jobs: JOBS });
-    if (url.pathname === "/repos/me/bench/actions/caches") return send({ actions_caches: [{ key: "bench-Linux-77-1", ref: "refs/heads/main", created_at: at(300), size_in_bytes: 1024 ** 3 }] });
+    if (url.pathname === "/repos/me/bench/actions/caches") {
+      // As in a real run: magic-nix-cache's many entries come first, newest first, so the
+      // cache-nix-action and Hestia entries are on the third page.
+      const page = Number(url.searchParams.get("page") ?? 1);
+      const perPage = Number(url.searchParams.get("per_page") ?? 30);
+      return send({ total_count: CACHES.length, actions_caches: CACHES.slice((page - 1) * perPage, page * perPage) });
+    }
     response.writeHead(404).end();
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -135,11 +154,14 @@ test("end to end, against a fake GitHub API", async () => {
     };
     const out = await report("77");
     assert.equal(out.code, 0, out.text);
-    assert.equal(out.text.trim().split("\n").length, 8, "a header, a rule and six rows");
+    assert.equal(out.text.trim().split("\n").length, 10, "a header, a rule and eight rows");
     assert.match(out.text, /\| cache-nix-action \| cold \| .+ \| 1024 MiB \|/);
     const saved = JSON.parse(readFileSync(join(dir, "report-77.json"), "utf8"));
+    assert.deepEqual(saved.cacheBytes, { "cache-nix-action": 1024 ** 3, hestia: 5 * 1024 ** 2, "magic-nix-cache": 230_000 }, "entries from every page are counted");
+    assert.ok(asked.some((line) => line.includes("page=3")), "the third page was read");
     assert.deepEqual(saved.run, { id: "77", attempt: "1", ref: "refs/heads/main", created_at: at(-5) });
-    assert.equal(saved.rows.length, 6);
+    assert.equal(saved.rows.length, 8);
+    assert.deepEqual(saved.rows.filter((row: { conclusion: string }) => row.conclusion === "missing"), [], "every result found its job");
     assert.ok(asked.every((line) => line.endsWith("Bearer t0ken")), "every request carries the token");
 
     const pr = await report("78");

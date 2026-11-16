@@ -1,9 +1,9 @@
 # nix-ci-cache
 
 How much does a Nix cache save on GitHub Actions, and what does it cost? This repository builds
-the same workload with each caching approach. First it builds with an empty cache, then again
-in a second job that can use what the first one saved. It reports how long each step took, what
-Nix had to build and fetch, and how much each approach stored, in every run's summary.
+the same workload with each caching approach: first in a cold job, then again in a warm job that
+can use what the cold one saved. It reports how long each step took, what Nix had to build and
+fetch, and how much each approach stored, in every run's summary.
 
 The approaches, each with its own defaults:
 
@@ -14,6 +14,10 @@ The approaches, each with its own defaults:
   default, are turned off.
 - **[cache-nix-action](https://github.com/nix-community/cache-nix-action)**: saves the whole
   `/nix/store` as one GitHub Actions cache entry and restores it in the next job.
+- **[Hestia](https://github.com/Mic92/hestia)**: a daemon like magic-nix-cache, which packs
+  paths into a few large, deduplicated cache entries instead of one per path, and says this
+  makes transfers "a lot faster". By default it also keeps the paths it fetched from
+  cache.nixos.org.
 
 ## Why
 
@@ -31,9 +35,8 @@ number coming from a run anyone can open.
 - **ripgrep (Rust) and jq (C), built from source.** Each run gives them its own `BENCH_RUN`
   attribute, so their derivations are new every run. No cache can already hold them from an
   earlier one.
-- **Their dependencies come from cache.nixos.org,** as in a typical project's CI. On a machine
-  with nothing in its store, Nix plans to build 5 derivations and fetch 101 paths, a 648.4 MiB
-  download.
+- **Their dependencies come from cache.nixos.org,** as in a typical project's CI. On a fresh
+  runner, Nix plans to build 3 derivations and fetch 103 paths, a 648.4 MiB download.
 - **A dev shell** with Node.js, the GitHub CLI and jq, entered with `nix develop`.
 
 **The jobs** come from [`bench.yml`](.github/workflows/bench.yml):
@@ -41,6 +44,11 @@ number coming from a run anyone can open.
 - Each approach runs a **cold** job, then a **warm** job after all the cold ones finish.
 - Both jobs of a run build the same derivations. That's all the warm job can reuse, as it runs on
   a fresh runner.
+- "Cold" means something different per approach:
+  - cache-nix-action's key is new every run, so its cold job really starts with nothing;
+  - magic-nix-cache and Hestia name their entries by content, so a cold job can already use the
+    dependencies earlier runs on the branch stored. Only the run's own builds are new. That is
+    what a CI job for a new commit sees.
 - Each job, from [`measure.yml`](.github/workflows/measure.yml), installs Nix with
   `cachix/install-nix-action`, sets up its approach, plans the build with `--dry-run`, builds,
   and enters the dev shell.
@@ -51,6 +59,44 @@ number coming from a run anyone can open.
 - what the dry run said Nix would build and fetch;
 - the store's size after the job;
 - how much each approach stored in the Actions cache during the run.
+
+## Results
+
+Measured on 2026-11-16 in [this run](https://github.com/Urthella/nix-ci-cache/actions/runs/43815114504),
+the second on this branch, with Nix 2.35.6 on `ubuntu-24.04`:
+
+| Approach | Pass | Job | Install Nix | Restore | Build | Dev shell | Save | Built | Fetched | Store | Cache stored |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| none | cold | 1m 58s | 5s | – | 1m 36s | 3s | – | 3 | 103 (648.4 MiB) | 2788 MiB | – |
+| none | warm | 1m 40s | 4s | – | 1m 13s | 3s | – | 3 | 103 (648.4 MiB) | 2788 MiB | – |
+| magic-nix-cache | cold | 1m 59s | 4s | 11s | 1m 11s | 9s | 1s | 3 | 103 (514.2 MiB) | 3466 MiB | 17 MiB |
+| magic-nix-cache | warm | 32s | 3s | 9s | 1s | 3s | 2s | 0 | 12 (0 MiB) | 1611 MiB | – |
+| cache-nix-action | cold | 1m 35s | 4s | 1s | 1m 04s | 2s | 11s | 3 | 103 (648.4 MiB) | 2788 MiB | 800 MiB |
+| cache-nix-action | warm | 42s | 4s | 29s | 1s | 0s | 0s | 0 | 0 (0 MiB) | 2788 MiB | – |
+| hestia | cold | 1m 35s | 3s | 2s | 1m 07s | 4s | 2s | 3 | 103 (946.7 MiB) | 2788 MiB | 0 MiB |
+| hestia | warm | 36s | 3s | 2s | 4s | 9s | 0s | 0 | 12 (56.9 MiB) | 932 MiB | – |
+
+"Built" and "Fetched" are what Nix's dry run planned. "Cache stored" is what the run added to
+the Actions cache.
+
+- **Every cache cut the warm job from 1m 40s to 32–42 s**, and the build step from over a minute
+  to 1–4 s. The order among them isn't stable: in
+  [the branch's first run](https://github.com/Urthella/nix-ci-cache/actions/runs/43814274251), the
+  warm jobs took 33 s for cache-nix-action, 43 s for Hestia and 53 s for magic-nix-cache. Without
+  a cache, the same job took 1m 20s to 1m 58s across runs, so differences of 10 s are noise here.
+- **Storage is where they differ:**
+  - **cache-nix-action** stored the whole store, 800 MiB, under a new key every run. At that
+    rate GitHub's 10 GB per-repository quota holds about a dozen runs. Its warm job spent 29 s
+    restoring it.
+  - **magic-nix-cache** stored 17 MiB, one narinfo and one NAR entry per path. Main's first
+    run, with nothing stored yet, stored 139 MiB. Its warm job fetched only the workload's
+    12 runtime paths, so its store was the smallest but one.
+  - **Hestia** stored 0.3 MiB in this run. Each run's rebuilt ripgrep and jq are the same
+    programs under new store paths, and its content-defined chunks dedupe what it already has.
+    In the branch's first run, with nothing stored yet, it stored 214 MiB in four packs,
+    dependencies included. Its warm store was the smallest, at 932 MiB.
+- **magic-nix-cache's entries don't report a download size**, so Nix's plan shows its 12 paths
+  as 0 KiB. Hestia's plan shows the same 12 paths as 56.9 MiB.
 
 ## Running it
 
@@ -72,9 +118,11 @@ BENCH_RUN=mine nix build --impure .#default
     MiB and GiB;
   - jobs are found by pass and approach, and no approach's name can match another's;
   - step times include post steps, and skipped steps show no time rather than 0s;
-  - cache sizes count only this run's entries, on its ref;
-  - end to end, the script runs against a fake GitHub API, for a push and for a pull request.
-- **Mutation testing.** Seventeen deliberate bugs were planted in the report one at a time, and
+  - cache sizes count only this run's entries, on its ref, telling Hestia's packs and manifests from
+    magic-nix-cache's entries;
+  - end to end, the script runs against a fake GitHub API, for a push and for a pull request,
+    reading every page of the cache list: magic-nix-cache alone fills more than the first one.
+- **Mutation testing.** Twenty-three deliberate bugs were planted in the report one at a time, and
   the tests caught every one.
 
 ## Limits
@@ -83,8 +131,10 @@ BENCH_RUN=mine nix build --impure .#default
   would shift the balance.
 - A warm job runs minutes after its cold one. Across days, GitHub may evict cache entries; its
   quota is 10 GB per repository.
-- cache.nixos.org is always there, so "cold" means an empty Actions cache, not an empty world.
-- Runner and network speed vary from run to run, so compare approaches within one run.
+- cache.nixos.org is always there, so no cold job starts from nothing. What each approach's cold
+  job starts with is described under "What's measured".
+- Runner and network speed vary from run to run: two runs here put the warm jobs in different
+  orders.
 
 ## License
 

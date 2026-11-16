@@ -9,14 +9,18 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const APPROACHES = ["none", "magic-nix-cache", "cache-nix-action"] as const;
+export const APPROACHES = ["none", "magic-nix-cache", "cache-nix-action", "hestia"] as const;
 export const PASSES = ["cold", "warm"] as const;
 
 /** The step that sets an approach up, whose post step saves its cache. */
 const SETUP: Record<string, string | undefined> = {
   "magic-nix-cache": "Set up magic-nix-cache",
   "cache-nix-action": "Restore with cache-nix-action",
+  hestia: "Set up hestia",
 };
+
+/** Hestia stores packs, named by their SHA-256, and numbered manifests such as "m3#6". */
+const isHestia = (key: string) => /^pack-[0-9a-f]{64}$/.test(key) || /^m\d+#\d+$/.test(key);
 
 export interface Step {
   name: string;
@@ -110,15 +114,16 @@ export function rows(jobs: Job[], results: Result[]): Row[] {
 
 /**
  * What each approach stored during the run: cache-nix-action under its "bench-" key for the run,
- * and magic-nix-cache everything else the run's ref created after it started, since no other
- * step writes to the cache.
+ * Hestia in its packs and manifests, and magic-nix-cache everything else the run's ref created
+ * after it started, since no other step writes to the cache.
  */
 export function cacheBytes(caches: Cache[], ref: string, since: string, run: string): Record<string, number> {
   const mine = caches.filter((cache) => cache.ref === ref && Date.parse(cache.created_at) >= Date.parse(since));
   const sum = (list: Cache[]) => list.reduce((total, cache) => total + cache.size_in_bytes, 0);
   return {
     "cache-nix-action": sum(mine.filter((cache) => cache.key.startsWith("bench-") && cache.key.endsWith(run))),
-    "magic-nix-cache": sum(mine.filter((cache) => !cache.key.startsWith("bench-"))),
+    hestia: sum(mine.filter((cache) => isHestia(cache.key))),
+    "magic-nix-cache": sum(mine.filter((cache) => !cache.key.startsWith("bench-") && !isHestia(cache.key))),
   };
 }
 
@@ -163,6 +168,23 @@ async function api<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+const PAGE = 100;
+const MAX_PAGES = 100;
+
+/**
+ * Every cache entry in the repository. magic-nix-cache writes two entries per store path, so one
+ * run alone fills more than a page, and the newest entries aren't always the ones that matter.
+ */
+async function allCaches(repo: string): Promise<Cache[]> {
+  const caches: Cache[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const { actions_caches } = await api<{ actions_caches: Cache[] }>(`/repos/${repo}/actions/caches?per_page=${PAGE}&page=${page}&sort=created_at&direction=desc`);
+    caches.push(...actions_caches);
+    if (actions_caches.length < PAGE) break;
+  }
+  return caches;
+}
+
 if (import.meta.main) {
   const [dir, out] = process.argv.slice(2);
   const repo = process.env.GITHUB_REPOSITORY;
@@ -174,10 +196,10 @@ if (import.meta.main) {
   } else {
     const run = await api<{ created_at: string; head_branch: string; event: string; pull_requests: { number: number }[] }>(`/repos/${repo}/actions/runs/${id}`);
     const { jobs } = await api<{ jobs: Job[] }>(`/repos/${repo}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`);
-    const { actions_caches } = await api<{ actions_caches: Cache[] }>(`/repos/${repo}/actions/caches?per_page=100&sort=created_at&direction=desc`);
+    const caches = await allCaches(repo);
     const ref = run.event === "pull_request" && run.pull_requests[0] ? `refs/pull/${run.pull_requests[0].number}/merge` : `refs/heads/${run.head_branch}`;
     const table = rows(jobs, readResults(dir));
-    const stored = cacheBytes(actions_caches, ref, run.created_at, `${id}-${attempt}`);
+    const stored = cacheBytes(caches, ref, run.created_at, `${id}-${attempt}`);
     writeFileSync(out, JSON.stringify({ run: { id, attempt, ref, created_at: run.created_at }, rows: table, cacheBytes: stored }, null, 2) + "\n");
     console.log(markdown(table, stored));
   }
