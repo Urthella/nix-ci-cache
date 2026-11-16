@@ -14,6 +14,10 @@ The approaches, each with its own defaults:
   default, are turned off.
 - **[cache-nix-action](https://github.com/nix-community/cache-nix-action)**: saves the whole
   `/nix/store` as one GitHub Actions cache entry and restores it in the next job.
+- **[Hestia](https://github.com/Mic92/hestia)**: a daemon like magic-nix-cache, which packs
+  paths into a few large, deduplicated cache entries instead of one per path, and says this
+  makes transfers "a lot faster". By default it also keeps the paths it fetched from
+  cache.nixos.org.
 
 ## Why
 
@@ -72,9 +76,10 @@ BENCH_RUN=mine nix build --impure .#default
     MiB and GiB;
   - jobs are found by pass and approach, and no approach's name can match another's;
   - step times include post steps, and skipped steps show no time rather than 0s;
-  - cache sizes count only this run's entries, on its ref;
+  - cache sizes count only this run's entries, on its ref, telling Hestia's packs and manifests from
+    magic-nix-cache's entries;
   - end to end, the script runs against a fake GitHub API, for a push and for a pull request.
-- **Mutation testing.** Seventeen deliberate bugs were planted in the report one at a time, and
+- **Mutation testing.** Twenty-two deliberate bugs were planted in the report one at a time, and
   the tests caught every one.
 
 ## Limits

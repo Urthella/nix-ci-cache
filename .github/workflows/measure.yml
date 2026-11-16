@@ -41,6 +41,10 @@ jobs:
         with:
           primary-key: bench-${{ runner.os }}-${{ env.BENCH_RUN }}
 
+      - name: Set up hestia
+        if: inputs.approach == 'hestia'
+        uses: Mic92/hestia@v3
+
       - name: Plan the build
         run: nix build --impure --dry-run .#default 2>&1 | tee plan.txt
 
